@@ -6,13 +6,27 @@ public class Player {
   private static int playerCount = 0;
 
   public final int id;
+  private PlayerType type;
 
   public Player() {
+    this(PlayerType.Human);
+  }
+
+  public Player(PlayerType playerType) {
     if (playerCount >= MAX_PLAYERS) {
       throw new IllegalStateException("Cannot create more than " + MAX_PLAYERS + " players.");
     }
     this.id = nextId++;
     playerCount++;
+    type = playerType;
+  }
+
+  public PlayerType getType() {
+    return type;
+  }
+
+  public void setType(PlayerType type) {
+    this.type = type;
   }
 
   @Override

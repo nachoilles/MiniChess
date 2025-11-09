@@ -3,11 +3,12 @@ package org.main;
 import javax.swing.SwingUtilities;
 
 import org.chess.Game;
+import org.chess.players.PlayerType;
 import org.ui.BoardFrame;
 
 public class Main {
   public static void main(String[] args) {
-    Game game = new Game();
+    Game game = new Game(PlayerType.RandomAI, PlayerType.RandomAI);
     SwingUtilities.invokeLater(() -> {
       BoardFrame window = new BoardFrame(game.getBoardSnapshot(), game, game);
 

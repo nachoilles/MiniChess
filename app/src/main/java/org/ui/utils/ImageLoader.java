@@ -26,10 +26,8 @@ public class ImageLoader {
         try {
             String fileName = pieceType.toLowerCase() + "_" + (ownerId == 1 ? "white" : "black") + ".svg";
             InputStream stream = ImageLoader.class.getClassLoader().getResourceAsStream("simple_assets/" + fileName);
-            if (stream == null) {
-                System.err.println("Missing resource: simple_assets/" + fileName); // whatever path i put it never prints anything. i think it is because the .jar does not use the console for std out
+            if (stream == null)
                 return null;
-            }
 
             BufferedImage original = SvgToBufferedImageConverter.convert(stream, size, size);
 

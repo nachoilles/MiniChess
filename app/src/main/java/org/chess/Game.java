@@ -6,6 +6,8 @@ import java.util.Map;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
+import org.ai.Agent;
+import org.ai.RandomAI;
 import org.chess.pieces.Bishop;
 import org.chess.pieces.King;
 import org.chess.pieces.Knight;
@@ -14,6 +16,7 @@ import org.chess.pieces.Piece;
 import org.chess.pieces.Queen;
 import org.chess.pieces.Rook;
 import org.chess.players.Player;
+import org.chess.players.PlayerType;
 import org.chess.utils.BoardSnapshot;
 import org.chess.utils.Coords;
 import org.chess.utils.Move;
@@ -34,6 +37,10 @@ public class Game implements BoardListener, ControlListener {
   private Piece selectedPiece;
   private ArrayList<MoveSnapshot> moveHistory;
   private boolean waitingForCoronation = false;
+  private boolean gameIsOver = false;
+  private final ArrayList<Integer> boardStateHistory = new ArrayList<>();
+
+  private boolean aiThinking = false;
 
   private Runnable onBoardUpdated;
   private Runnable onMove;
@@ -41,18 +48,30 @@ public class Game implements BoardListener, ControlListener {
   private Consumer<Consumer<String>> onCoronation;
 
   public Game() {
-    init();
-    initWithPieces();
+    this(null, null, null);
   }
 
   public Game(HashMap<Coords, Piece> pieces) {
+    this(null, null, pieces);
+  }
+
+  public Game(PlayerType p1, PlayerType p2) {
+    this(p1, p2, null);
+  }
+
+  public Game(PlayerType p1, PlayerType p2, HashMap<Coords, Piece> pieces) {
+    this.p1 = p1 == null ? new Player() : p1 == PlayerType.Human ? new Player() : new RandomAI();
+    this.p2 = p2 == null ? new Player() : p2 == PlayerType.Human ? new Player() : new RandomAI();
     init();
-    this.pieces = new HashMap<>(pieces);
+    if (pieces == null) {
+      initWithPieces();
+    } else {
+      this.pieces = new HashMap<>(pieces);
+    }
+    maybeTriggerAI();
   }
 
   private void init() {
-    p1 = new Player();
-    p2 = new Player();
     activePlayer = 1;
     pieces = new HashMap<>();
     moveHistory = new ArrayList<>();
@@ -138,12 +157,17 @@ public class Game implements BoardListener, ControlListener {
     moveHistory.clear();
     waitingForCoronation = false;
     initWithPieces();
+    gameIsOver = false;
     if (onBoardUpdated != null) {
       onBoardUpdated.run();
     }
+    aiThinking = false;
+    maybeTriggerAI();
   }
 
   public void initWithPieces() {
+    if (pieces == null)
+      pieces = new HashMap<>();
     for (int i = 0; i < BOARD_SIZE; i++) {
       addPiece(new Coords(1, i), new Pawn(p1));
       addPiece(new Coords(6, i), new Pawn(p2));
@@ -185,11 +209,20 @@ public class Game implements BoardListener, ControlListener {
     boolean isStalemate = isStalemate(opponentId);
     boolean isCapture = moveHistory.getLast().captured() != null;
     PieceType coronationType = pieces.get(moveHistory.getLast().move().end()).getType();
-    return MoveParser.parseMove(moveHistory.getLast().move(), isCapture, isCheck, isCheckmate, isStalemate, coronationType);
+    return MoveParser.parseMove(moveHistory.getLast().move(), isCapture, isCheck, isCheckmate, isStalemate,
+        coronationType);
   }
 
   public HashMap<Coords, Piece> getPieces() {
     return pieces;
+  }
+
+  public Player getActivePlayer() {
+    return activePlayer == 1 ? p1 : p2;
+  }
+
+  private int getOpponent(int playerId) {
+    return playerId == 1 ? 2 : 1;
   }
 
   public Map<Coords, Piece> getPlayerPieces(int playerId) {
@@ -250,6 +283,8 @@ public class Game implements BoardListener, ControlListener {
   }
 
   public void move(Move move) {
+    if (gameIsOver)
+      return;
     selectedCell = null;
     selectedPiece = null;
 
@@ -263,24 +298,50 @@ public class Game implements BoardListener, ControlListener {
       waitingForCoronation = true;
       pieces.remove(move.end());
 
+      Player owner = move.piece().getOwner();
+
+      if (owner instanceof Agent) {
+        Agent ai = (Agent) owner;
+        String chosenPieceType = ai.choosePromotion(this, move);
+        Piece promoted = switch (chosenPieceType) {
+          case "♛" -> new Queen(owner);
+          case "♜" -> new Rook(owner);
+          case "♝" -> new Bishop(owner);
+          case "♞" -> new Knight(owner);
+          default -> new Queen(owner);
+        };
+        addPiece(move.end(), promoted);
+        moveHistory.add(new MoveSnapshot(move, capturedPiece));
+
+        if (onMove != null)
+          onMove.run();
+        if (onBoardUpdated != null)
+          onBoardUpdated.run();
+
+        waitingForCoronation = false;
+        aiThinking = false;
+        passTurn();
+        return;
+      }
+
       if (onCoronation != null) {
         onCoronation.accept(chosenPieceType -> {
           Piece promoted = switch (chosenPieceType) {
-            case "♛" -> new Queen(move.piece().getOwner());
-            case "♜" -> new Rook(move.piece().getOwner());
-            case "♝" -> new Bishop(move.piece().getOwner());
-            case "♞" -> new Knight(move.piece().getOwner());
-            default -> move.piece();
+            case "♛" -> new Queen(owner);
+            case "♜" -> new Rook(owner);
+            case "♝" -> new Bishop(owner);
+            case "♞" -> new Knight(owner);
+            default -> new Queen(owner);
           };
           addPiece(move.end(), promoted);
           moveHistory.add(new MoveSnapshot(move, capturedPiece));
           if (onMove != null)
             onMove.run();
-          passTurn();
-
           if (onBoardUpdated != null)
             onBoardUpdated.run();
           waitingForCoronation = false;
+          aiThinking = false;
+          passTurn();
         });
       }
       return;
@@ -308,6 +369,7 @@ public class Game implements BoardListener, ControlListener {
     if (onMove != null) {
       onMove.run();
     }
+    aiThinking = false;
     passTurn();
   }
 
@@ -361,10 +423,14 @@ public class Game implements BoardListener, ControlListener {
   }
 
   public void passTurn() {
+    boardStateHistory.add(computeBoardHash());
+    if (isCheckmate(activePlayer) || isStalemate(activePlayer))
+      gameIsOver = true;
     activePlayer = getOpponent(activePlayer);
+    maybeTriggerAI();
   }
 
-  private ArrayList<Move> getValidMovesOf(Coords pieceCoords) {
+  public ArrayList<Move> getValidMovesOf(Coords pieceCoords) {
     ArrayList<Move> validMoves = new ArrayList<>();
     if (pieceCoords == null)
       return validMoves;
@@ -466,7 +532,7 @@ public class Game implements BoardListener, ControlListener {
     return validMoves;
   }
 
-  private ArrayList<Move> getDirectionalMoves(
+  public ArrayList<Move> getDirectionalMoves(
       int[][] directions,
       Coords pieceCoords,
       Map<Coords, Piece> allyPieces,
@@ -489,7 +555,7 @@ public class Game implements BoardListener, ControlListener {
     return validMoves;
   }
 
-  private boolean isKingInCheck(int playerId) {
+  public boolean isKingInCheck(int playerId) {
     Coords kingCoords = null;
 
     for (Map.Entry<Coords, Piece> entry : pieces.entrySet()) {
@@ -521,7 +587,21 @@ public class Game implements BoardListener, ControlListener {
   }
 
   public boolean isStalemate(int playerId) {
-    return getAllLegalMoves(playerId).isEmpty() && !isKingInCheck(playerId);
+    if (getAllLegalMoves(playerId).isEmpty() && !isKingInCheck(playerId))
+      return true;
+    ArrayList<Piece> piecesOnBoard = new ArrayList<>(pieces.values());
+    if (piecesOnBoard.size() == 2)
+      return true;
+    if (piecesOnBoard.size() == 3) {
+      boolean hasOnlyKingAndMinor = piecesOnBoard.stream()
+          .allMatch(
+              p -> p.getType() == PieceType.King || p.getType() == PieceType.Bishop || p.getType() == PieceType.Knight);
+      if (hasOnlyKingAndMinor)
+        return true;
+    }
+    if (isThreefoldRepetition())
+      return true;
+    return false;
   }
 
   public ArrayList<Move> getAllLegalMoves(int playerId) {
@@ -537,7 +617,7 @@ public class Game implements BoardListener, ControlListener {
     return allLegalMoves;
   }
 
-  private ArrayList<Move> getLegalMovesOf(Coords pieceCoords) {
+  public ArrayList<Move> getLegalMovesOf(Coords pieceCoords) {
     ArrayList<Move> validMoves = getValidMovesOf(pieceCoords);
     ArrayList<Move> legalMoves = new ArrayList<>();
     for (Move move : validMoves) {
@@ -580,7 +660,7 @@ public class Game implements BoardListener, ControlListener {
     return legalMoves;
   }
 
-  private boolean isSquareAttacked(Coords square, int enemyId) {
+  public boolean isSquareAttacked(Coords square, int enemyId) {
     Map<Coords, Piece> enemyPieces = getPlayerPieces(enemyId);
     for (Map.Entry<Coords, Piece> entry : enemyPieces.entrySet()) {
       ArrayList<Move> moves = getValidMovesOf(entry.getKey());
@@ -592,7 +672,56 @@ public class Game implements BoardListener, ControlListener {
     return false;
   }
 
-  private int getOpponent(int playerId) {
-    return playerId == 1 ? 2 : 1;
+  private void maybeTriggerAI() {
+    Player current = getActivePlayer();
+    if (current instanceof Agent && !aiThinking && !waitingForCoronation) {
+      aiThinking = true;
+      new Thread(() -> {
+        try {
+          Move move = ((Agent) current).decideMove(this);
+          if (move != null) {
+            javax.swing.SwingUtilities.invokeLater(() -> {
+              move(move);
+              if (onBoardUpdated != null)
+                onBoardUpdated.run();
+              maybeTriggerAI();
+            });
+          } else {
+            aiThinking = false;
+          }
+        } finally {
+          /*
+           * if (onBoardUpdated != null)
+           * onBoardUpdated.run();
+           */
+        }
+        maybeTriggerAI();
+      }).start();
+    }
+  }
+
+  private int computeBoardHash() {
+    int hash = activePlayer;
+    for (Map.Entry<Coords, Piece> entry : pieces.entrySet()) {
+      Coords coords = entry.getKey();
+      Piece piece = entry.getValue();
+      int pieceHash = coords.row() * 31 + coords.col();
+      pieceHash = pieceHash * 31 + piece.getType().ordinal();
+      pieceHash = pieceHash * 31 + piece.getOwner().id;
+      hash = hash * 31 + pieceHash;
+    }
+    return hash;
+  }
+
+  private boolean isThreefoldRepetition() {
+    int currentHash = computeBoardHash();
+    int count = 0;
+    for (int hash : boardStateHistory) {
+      if (hash == currentHash)
+        count++;
+      if (count >= 3)
+        return true;
+    }
+    return false;
   }
 }
